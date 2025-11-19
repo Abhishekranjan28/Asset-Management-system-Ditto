@@ -27,9 +27,9 @@ DB_PATH=...
 
 ## Run Flask API
 ```bash
-python -m camera_vlm_ditto --flask 1 --port 8089
+python -m camera_vlm_ditto.cli --flask 1 --port 8089
 ```
 
 ## Optional batch processing
 ```bash
-python -m camera_vlm_ditto --db ./images.db --limit 50
+python -m camera_vlm_ditto.cli --db ./images.db --limit 50
