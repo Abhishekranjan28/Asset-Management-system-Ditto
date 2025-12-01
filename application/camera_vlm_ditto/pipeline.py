@@ -3,7 +3,6 @@ import io
 import json
 import pathlib
 from typing import Any, Dict, Optional, Tuple, List
-import sqlite3
 from PIL import Image
 
 from .config import CONFIG, STATIC_MOUNT, DB_DEFAULT
@@ -23,14 +22,14 @@ def _public_url_for_path(path: str) -> str:
     return f"file://{p.resolve()}"
 
 
-def _thing_id_for_image(camera_id: str, image_id: int) -> str:
+def _thing_id_for_image(rec: ImageRecord) -> str:
     """
-    One Ditto Thing per baseline DB row.
+    One Ditto Thing per image.
 
     Same convention as server:
       site01:<camera_id>-<image_id>
     """
-    return f"site01:{camera_id}-{image_id}"
+    return f"site01:{rec.camera_id}-{rec.id}"
 
 
 def process_record(
@@ -44,219 +43,22 @@ def process_record(
     db_path: str = DB_DEFAULT,
 ) -> Tuple[bool, Optional[str]]:
     """
-    Batch-mode processing with the SAME semantics as the live /upload flow:
+    Batch-mode processing.
 
-    Given an unprocessed DB row `rec`:
-      - Load its image from disk.
-      - Compare to ALL existing images in DB (excluding rec.id).
+    For consistency with the HTTP /upload flow, we:
+      - Look at all other images within `proximity_m` meters of this record.
+      - If any baseline shows "major change" via compare_change, we treat this
+        image as changed vs. that baseline.
+      - Otherwise we treat this as not changed (but still push to Ditto).
 
-      Rules:
-
-      1. If ANY existing image is within <= proximity_m AND a major change is detected:
-           * Use that existing row as the baseline.
-           * Update that baseline row with the new capture (path, lat, lon, captured_at, caption, detections, changed=1, reason).
-           * Append to Ditto history for that Thing.
-           * Rec row is just marked processed=1 (it’s a “raw ingestion” row).
-
-      2. If there is an existing image within <= proximity_m AND no major change is detected:
-           * Use the nearest existing row as baseline.
-           * Update that baseline row with the new capture (changed=0, reason="").
-           * Append to Ditto history.
-           * Rec row is marked processed=1.
-
-      3. If NO existing image is within <= proximity_m:
-           * Treat `rec` itself as the baseline.
-           * Update its row with caption, detections, changed=0.
-           * Create a new Ditto Thing and set history=[this capture].
-           * Mark rec row processed=1.
+    NOTE: In batch mode we do NOT mutate other DB rows; mutation is handled
+    by the ingestion flow. This function only decides changed/reason and
+    pushes to Ditto for the current `rec`.
     """
-    # Load new image bytes (rec.path already exists)
-    raw = load_image_bytes(rec.path)
-
-    # Analyze new image once
-    analysis = vlm.analyze(raw)
-    new_objs = analysis.get("objects", [])
-    caption = analysis.get("caption", "")
-
-    # DB connection
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-
-    # Existing rows EXCEPT rec.id
-    cur.execute(
-        "SELECT id,camera_id,path,lat,lon,detections_json FROM images WHERE id <> ?",
-        (rec.id,),
-    )
-    rows = cur.fetchall()
-
-    # --- Same baseline logic as server ---
-
-    candidates: List[Tuple[float, sqlite3.Row]] = []
-    for r in rows:
-        try:
-            d = haversine_m(rec.lat, rec.lon, r["lat"], r["lon"])
-        except Exception:
-            continue
-        if d <= proximity_m:
-            candidates.append((d, r))
-
-    candidates.sort(key=lambda x: x[0])
-
-    raw_hash = sha256_hex(raw)
-    pixel_hash_new: Optional[str] = None
-
-    baseline_row: Optional[sqlite3.Row] = None
-    baseline_dist: Optional[float] = None
-    prev_objs_for_baseline: List[Dict[str, Any]] = []
-    major_changed = False
-    change_reason = ""
-
-    minor_candidate_row: Optional[sqlite3.Row] = None
-    minor_candidate_dist: Optional[float] = None
-    minor_prev_objs: List[Dict[str, Any]] = []
-
-    for dist, r in candidates:
-        if minor_candidate_row is None:
-            minor_candidate_row = r
-            minor_candidate_dist = dist
-            try:
-                pj = (
-                    json.loads(r["detections_json"]) if r["detections_json"] else {}
-                )
-                minor_prev_objs = (
-                    pj.get("objects", [])
-                    if isinstance(pj, dict)
-                    else (pj or [])
-                )
-            except Exception:
-                minor_prev_objs = []
-
-        prev_path = r["path"]
-        if not prev_path:
-            continue
-        try:
-            prev_raw = load_image_bytes(prev_path)
-        except Exception:
-            continue
-
-        # Fast equality
-        if sha256_hex(prev_raw) == raw_hash:
-            continue
-        if pixel_hash_new is None:
-            pixel_hash_new = pixel_hash(raw)
-        try:
-            if pixel_hash(prev_raw) == pixel_hash_new:
-                continue
-        except Exception:
-            pass
-
-        cmp = vlm.compare_change(prev_raw, raw)
-        changed = bool(cmp.get("changed", False))
-        reason = str(cmp.get("reason", "")).strip()
-
-        if changed:
-            major_changed = True
-            change_reason = reason or "changed"
-            baseline_row = r
-            baseline_dist = dist
-            try:
-                pj = (
-                    json.loads(r["detections_json"])
-                    if r["detections_json"]
-                    else {}
-                )
-                prev_objs_for_baseline = (
-                    pj.get("objects", [])
-                    if isinstance(pj, dict)
-                    else (pj or [])
-                )
-            except Exception:
-                prev_objs_for_baseline = []
-            break
-
-    if major_changed:
-        mode = "baseline_major"
-    elif minor_candidate_row is not None:
-        mode = "baseline_minor"
-        baseline_row = minor_candidate_row
-        baseline_dist = minor_candidate_dist
-        prev_objs_for_baseline = minor_prev_objs
-        change_reason = ""
-    else:
-        mode = "new_thing"
-        baseline_row = None
-        baseline_dist = None
-        prev_objs_for_baseline = []
-
-    # --- DB updates ---
-
-    if mode == "new_thing":
-        # Rule #3: rec itself becomes baseline; update its row
-        changed_flag = 0
-        reason_db = ""
-        image_id = rec.id
-        baseline_camera_id = rec.camera_id
-        nearest_id = None
-        nearest_dist = None
-
-        cur.execute(
-            "UPDATE images SET processed=1, changed=?, reason=?, caption=?, detections_json=? "
-            "WHERE id=?",
-            (
-                changed_flag,
-                reason_db,
-                caption,
-                json.dumps({"objects": new_objs}),
-                rec.id,
-            ),
-        )
-    else:
-        # Rule #1 or #2: use existing baseline row, update it, mark rec processed
-        assert baseline_row is not None
-        image_id = int(baseline_row["id"])
-        baseline_camera_id = str(baseline_row["camera_id"])
-
-        nearest_id = image_id
-        nearest_dist = baseline_dist
-
-        changed_flag = 1 if mode == "baseline_major" else 0
-        reason_db = change_reason if mode == "baseline_major" else ""
-
-        # Update baseline row to latest capture
-        cur.execute(
-            "UPDATE images SET camera_id=?, path=?, lat=?, lon=?, captured_at=?, "
-            "processed=1, changed=?, reason=?, caption=?, detections_json=? "
-            "WHERE id=?",
-            (
-                rec.camera_id,
-                str(rec.path),
-                float(rec.lat),
-                float(rec.lon),
-                rec.captured_at,
-                changed_flag,
-                reason_db,
-                caption,
-                json.dumps({"objects": new_objs}),
-                image_id,
-            ),
-        )
-
-        # Mark the “incoming” rec row as processed too (it’s now just a source)
-        cur.execute(
-            "UPDATE images SET processed=1 WHERE id=?",
-            (rec.id,),
-        )
-
-    conn.commit()
-    conn.close()
-
-    # --- Ditto updates ---
-
-    thing_id = _thing_id_for_image(baseline_camera_id, image_id)
+    thing_id = _thing_id_for_image(rec)
     ditto.ensure_thing(thing_id)
 
-    # Build last_capture based on rec (the new capture)
+    raw = load_image_bytes(rec.path)
     try:
         pil = Image.open(io.BytesIO(raw)).convert("RGB")
         width, height = pil.width, pil.height
@@ -264,9 +66,97 @@ def process_record(
         pil = None
         width = height = None
 
-    image_url = _public_url_for_path(rec.path)
+    analysis = vlm.analyze(raw)
+    objects = analysis.get("objects", [])
+    caption = analysis.get("caption", "")
 
-    last_capture: Dict[str, Any] = {
+    # Look for *all* candidate baselines within `proximity_m`
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, lat, lon, detections_json, path FROM images WHERE id <> ?",
+        (rec.id,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    candidates: List[Dict[str, Any]] = []
+    for r in rows:
+        try:
+            d = haversine_m(rec.lat, rec.lon, r["lat"], r["lon"])
+        except Exception:
+            continue
+        if d <= proximity_m:
+            candidates.append(
+                {
+                    "id": int(r["id"]),
+                    "lat": r["lat"],
+                    "lon": r["lon"],
+                    "detections_json": r["detections_json"],
+                    "path": r["path"],
+                    "distance": float(d),
+                }
+            )
+
+    baseline_change = None
+    baseline_prev_objs: List[Dict[str, Any]] = []
+
+    for c in candidates:
+        prev_path = c["path"]
+        if not prev_path:
+            continue
+        try:
+            prev_raw = load_image_bytes(prev_path)
+        except Exception:
+            continue
+
+        # Parse previous objects from detections_json
+        prev_objs_local: List[Dict[str, Any]] = []
+        try:
+            pj = json.loads(c["detections_json"]) if c["detections_json"] else {}
+            prev_objs_local = (
+                pj.get("objects", [])
+                if isinstance(pj, dict)
+                else (pj or [])
+            )
+        except Exception:
+            prev_objs_local = []
+
+        # Fast equality checks
+        try:
+            if sha256_hex(prev_raw) == sha256_hex(raw):
+                continue
+            if pixel_hash(prev_raw) == pixel_hash(raw):
+                continue
+        except Exception:
+            pass
+
+        # Call VLM compare_change
+        try:
+            cmp = vlm.compare_change(prev_raw, raw)
+            is_changed = bool(cmp.get("changed", False))
+            reason_local = str(cmp.get("reason", "")).strip()
+        except Exception:
+            is_changed = False
+            reason_local = ""
+
+        if is_changed:
+            if baseline_change is None or c["distance"] < baseline_change["distance"]:
+                baseline_change = {**c, "reason": reason_local}
+                baseline_prev_objs = prev_objs_local
+
+    if baseline_change is not None:
+        changed, reason = (True, baseline_change.get("reason") or "changed")
+        prev_objs = baseline_prev_objs
+    else:
+        changed, reason = (False, "")
+        prev_objs = []
+
+    image_url = _public_url_for_path(rec.path)
+    last_capture = {
         "image_url": image_url,
         "image_hash": f"sha256:{sha256_hex(raw)}",
         "captured_at": rec.captured_at,
@@ -279,48 +169,35 @@ def process_record(
     if embed_thumbnail and pil is not None:
         last_capture["thumbnail_b64"] = make_thumbnail_b64(pil, thumbnail_max)
 
-    # Append to history (keep existing, if any)
-    try:
-        existing_history = ditto.get_history(thing_id)
-    except Exception:
-        existing_history = []
-    if not isinstance(existing_history, list):
-        existing_history = []
-
-    history_entry = {
-        k: v for k, v in last_capture.items() if k != "thumbnail_b64"
-    }
-    full_history = existing_history + [history_entry]
-    max_len = CONFIG.get("DITTO_HISTORY_MAX", 20)
-    if len(full_history) > max_len:
-        full_history = full_history[-max_len:]
-
     detections_payload = {
-        "objects": new_objs,
+        "objects": objects,
         "caption": caption,
-        "changed_since_previous": bool(changed_flag),
-        "change_reason": reason_db or "",
-        "prev": {"objects": prev_objs_for_baseline},
+        "changed_since_previous": bool(changed),
+        "change_reason": reason or "",
+        "prev": {"objects": prev_objs},
     }
+
+    # For per-image things in batch mode, history is trivial
+    history = [{k: v for k, v in last_capture.items() if k != "thumbnail_b64"}]
 
     ditto.patch_updates(
         thing_id,
         last_capture=last_capture,
-        history=full_history,
+        history=history,
         detections=detections_payload,
-        max_len=max_len,
+        max_len=1,
     )
 
-    if changed_flag and CONFIG["SEND_ALERT_MESSAGE"]:
+    if changed and CONFIG["SEND_ALERT_MESSAGE"]:
         ditto.send_alert(
             thing_id,
             "alert",
             {
-                "reason": reason_db or "major change detected",
+                "reason": reason or "major change detected",
                 "thingId": thing_id,
                 "image_url": image_url,
-                "objects": new_objs,
+                "objects": objects,
             },
         )
 
-    return bool(changed_flag), reason_db or ""
+    return bool(changed), reason
