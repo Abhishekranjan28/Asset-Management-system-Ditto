@@ -17,12 +17,16 @@ def main():
     parser.add_argument("--port", type=int, default=8089, help="Flask port")
     args, _ = parser.parse_known_args()
 
+    # -----------------------------
+    # Batch processing mode
+    # -----------------------------
     if args.db:
         rows = fetch_new_images(args.db, args.limit)
         if rows:
             vlm = VisionClient(GOOGLE_API_KEY, CONFIG["GEMINI_MODEL"])
             ditto = DittoClient(DITTO_BASE_URL, DITTO_USER, DITTO_PASS)
             processed_ids = []
+
             for rec in rows:
                 try:
                     changed, reason = process_record(
@@ -39,13 +43,21 @@ def main():
                         f"[{'CHANGED' if changed else 'OK'}] "
                         f"camera={rec.camera_id} image_id={rec.id} reason={reason or '-'}"
                     )
+                    # We still mark this rec.id as processed via mark_processed
+                    # (process_record already sets processed=1, so this is safe/redundant).
                     processed_ids.append(rec.id)
                 except Exception as e:
                     print("Error processing record", rec.id, e)
+
+            # This will just ensure processed=1 for the batch;
+            # any rows that process_record already touched are unaffected.
             mark_processed(args.db, processed_ids)
         else:
             print("No new images to process.")
 
+    # -----------------------------
+    # Flask API mode
+    # -----------------------------
     if args.flask:
         app = create_app()
         app.run(host="0.0.0.0", port=args.port, debug=True)

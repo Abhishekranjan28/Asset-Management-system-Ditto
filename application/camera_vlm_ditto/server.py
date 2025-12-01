@@ -6,7 +6,7 @@ import time
 import sqlite3
 import pathlib
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from flask import Flask, request, jsonify, send_from_directory
@@ -63,12 +63,28 @@ def create_app() -> Flask:
     @flask_app.route("/upload", methods=["POST"])
     def upload_image_flask():
         """
-        Upload one image:
-          - Extract lat/lon/time via VLM
-          - Find nearest existing image (ANY camera) within PROXIMITY_METERS
-          - Compare content: sha, pixel_hash, then VLM compare_change
-          - Insert row in DB
-          - Create/update a Ditto Thing for THIS image (thingId = site01:<camera_id>-<image_id>)
+        New semantics (3 rules):
+
+        1. When a new image is uploaded, compare with ALL existing images.
+           - If ANY image within <= PROXIMITY_METERS AND major change is detected:
+               * Update that previous DB row (path/lat/lon/captured_at, caption, detections, changed=1, reason).
+               * Update its Ditto Thing in-place (lastCapture, detections).
+               * Append new capture to Ditto history (keep previous entries).
+
+        2. When a new image is uploaded, compare with ALL existing images.
+           - If there is an image within <= PROXIMITY_METERS BUT NO major change:
+               * Update that existing DB row with new image data (caption, detections, path, lat/lon, captured_at, changed=0, reason="").
+               * Update Ditto Thing lastCapture & detections.
+               * Append new capture to Ditto history.
+               * Conceptually: new capture at same monitoring point, but “no major change”.
+
+        3. If NO existing image is within <= PROXIMITY_METERS:
+               * Insert a NEW DB row.
+               * Create a NEW Ditto Thing.
+               * History contains only this new capture.
+
+        In ALL cases: the image file is stored on disk under UPLOAD_DIR and the *latest*
+        DB row for that baseline location points to the newest image path.
         """
         try:
             file = request.files.get("file")
@@ -99,182 +115,283 @@ def create_app() -> Flask:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
 
-            # Find nearest stored image (ANY camera) based on geo distance
-            cur.execute("SELECT id,lat,lon,detections_json,path,camera_id FROM images")
+            # All existing images (ANY camera)
+            cur.execute(
+                "SELECT id,camera_id,path,lat,lon,detections_json FROM images"
+            )
             rows = cur.fetchall()
 
-            nearest_id = None
-            nearest_dist = float("inf")
-            nearest_path = None
-            nearest_camera_id = None
-            prev_objs: List[Dict[str, Any]] = []
+            # Run detection once for the new image
+            analysis = vlm.analyze(raw)
+            new_objs = analysis.get("objects", [])
+            caption = analysis.get("caption", "")
+
+            # ---- Decide baseline according to the 3 rules ----
+
+            # 1) Compute candidates within proximity radius
+            candidates: List[Tuple[float, sqlite3.Row]] = []
             for r in rows:
                 try:
                     d = haversine_m(lat, lon, r["lat"], r["lon"])
                 except Exception:
                     continue
-                if d < nearest_dist:
-                    nearest_dist = d
-                    nearest_id = r["id"]
-                    nearest_path = r["path"]
-                    nearest_camera_id = r["camera_id"]
+                if d <= CONFIG["PROXIMITY_METERS"]:
+                    candidates.append((d, r))
+
+            # Sort candidates by distance ascending
+            candidates.sort(key=lambda x: x[0])
+
+            raw_hash = sha256_hex(raw)
+            pixel_hash_new: Optional[str] = None
+
+            baseline_row: Optional[sqlite3.Row] = None
+            baseline_dist: Optional[float] = None
+            prev_objs_for_baseline: List[Dict[str, Any]] = []
+            major_changed = False
+            change_reason = ""
+
+            # For rule #2 (no major change but within radius)
+            minor_candidate_row: Optional[sqlite3.Row] = None
+            minor_candidate_dist: Optional[float] = None
+            minor_prev_objs: List[Dict[str, Any]] = []
+
+            # Scan all candidates within radius; stop on first MAJOR change
+            for dist, r in candidates:
+                # record nearest candidate as potential baseline if no major change
+                if minor_candidate_row is None:
+                    minor_candidate_row = r
+                    minor_candidate_dist = dist
                     try:
                         pj = (
                             json.loads(r["detections_json"])
                             if r["detections_json"]
                             else {}
                         )
-                        prev_objs = (
+                        minor_prev_objs = (
                             pj.get("objects", [])
                             if isinstance(pj, dict)
                             else (pj or [])
                         )
                     except Exception:
-                        prev_objs = []
+                        minor_prev_objs = []
 
-            # Analyze new image
-            analysis = vlm.analyze(raw)
-            new_objs = analysis.get("objects", [])
-            caption = analysis.get("caption", "")
-
-            # Compare vs nearest within proximity, but NEVER flag if bytes OR pixels identical
-            changed, reason = (False, "")
-            if nearest_id is not None and nearest_dist <= CONFIG["PROXIMITY_METERS"]:
+                prev_path = r["path"]
+                if not prev_path:
+                    continue
                 try:
-                    if nearest_path:
-                        prev_raw = load_image_bytes(nearest_path)
-                        # First: raw file equality (fast)
-                        if sha256_hex(prev_raw) == sha256_hex(raw):
-                            changed, reason = (False, "")
-                        else:
-                            # Second: content equality (EXIF/metadata agnostic)
-                            if pixel_hash(prev_raw) == pixel_hash(raw):
-                                changed, reason = (False, "")
-                            else:
-                                # Only if content differs, invoke the VLM
-                                cmp = vlm.compare_change(prev_raw, raw)
-                                changed, reason = (
-                                    bool(cmp.get("changed", False)),
-                                    str(cmp.get("reason", "")).strip(),
-                                )
+                    prev_raw = load_image_bytes(prev_path)
                 except Exception:
-                    changed, reason = (False, "")
+                    continue
 
-            # ALWAYS insert the new row
-            cur.execute(
-                "INSERT INTO images(camera_id,path,lat,lon,captured_at,processed,changed,reason,caption,detections_json) "
-                "VALUES (?,?,?,?,?,1,?,?,?,?)",
-                (
-                    camera_id,
-                    str(save_path),
-                    float(lat),
-                    float(lon),
-                    captured_at,
-                    int(bool(changed)),
-                    reason or "",
-                    caption,
-                    json.dumps({"objects": new_objs}),
-                ),
-            )
-            image_id = cur.lastrowid
-            conn.commit()
+                # Fast equality checks
+                if sha256_hex(prev_raw) == raw_hash:
+                    # Byte-identical → definitely no major change.
+                    continue
 
-            # One Ditto thing per image
-            thing_id = _thing_id_for_image(camera_id, image_id)
-            ditto.ensure_thing(thing_id)
-
-            try:
-                # lastCapture
+                if pixel_hash_new is None:
+                    pixel_hash_new = pixel_hash(raw)
                 try:
-                    img = Image.open(io.BytesIO(raw)).convert("RGB")
-                    width, height = img.width, img.height
+                    if pixel_hash(prev_raw) == pixel_hash_new:
+                        # Content-identical → no major change.
+                        continue
                 except Exception:
-                    width = height = None
+                    pass
 
-                last_capture = {
-                    "image_url": f"{STATIC_MOUNT}/{safe_name}",
-                    "image_hash": f"sha256:{sha256_hex(raw)}",
-                    "captured_at": captured_at,
-                    "size_bytes": len(raw),
-                    "lat": float(lat),
-                    "lon": float(lon),
-                }
-                if width and height:
-                    last_capture.update({"width": width, "height": height})
-                if CONFIG["EMBED_THUMBNAIL"] and width and height:
+                # Only if content genuinely differs, ask VLM about change
+                cmp = vlm.compare_change(prev_raw, raw)
+                changed = bool(cmp.get("changed", False))
+                reason = str(cmp.get("reason", "")).strip()
+
+                if changed:
+                    major_changed = True
+                    change_reason = reason or "changed"
+                    baseline_row = r
+                    baseline_dist = dist
                     try:
-                        last_capture["thumbnail_b64"] = make_thumbnail_b64(
-                            Image.open(save_path), CONFIG["THUMBNAIL_MAX_SIZE"]
+                        pj = (
+                            json.loads(r["detections_json"])
+                            if r["detections_json"]
+                            else {}
+                        )
+                        prev_objs_for_baseline = (
+                            pj.get("objects", [])
+                            if isinstance(pj, dict)
+                            else (pj or [])
                         )
                     except Exception:
-                        pass
+                        prev_objs_for_baseline = []
+                    break
 
-                detections_payload = {
-                    "objects": new_objs,
-                    "caption": caption,
-                    "changed_since_previous": bool(changed),
-                    "change_reason": reason or "",
-                    "prev": {"objects": prev_objs},
-                }
+            # Decide mode: new thing, baseline with major change, or baseline with minor/no change
+            if major_changed:
+                mode = "baseline_major"
+            elif minor_candidate_row is not None:
+                mode = "baseline_minor"
+                baseline_row = minor_candidate_row
+                baseline_dist = minor_candidate_dist
+                prev_objs_for_baseline = minor_prev_objs
+                change_reason = ""
+            else:
+                mode = "new_thing"
+                baseline_row = None
+                baseline_dist = None
+                prev_objs_for_baseline = []
 
-                # For an image-thing, history is just this capture (kept as list)
-                history = [
-                    {k: v for k, v in last_capture.items() if k != "thumbnail_b64"}
-                ]
+            # ---- DB updates according to mode ----
 
-                ditto.patch_updates(
-                    thing_id,
-                    last_capture=last_capture,
-                    history=history,
-                    detections=detections_payload,
-                    max_len=1,
-                )
-
-                if changed and CONFIG["SEND_ALERT_MESSAGE"]:
-                    ditto.send_alert(
-                        thing_id,
-                        "alert",
-                        {
-                            "reason": reason or "major change detected",
-                            "thingId": thing_id,
-                            "image_url": f"{STATIC_MOUNT}/{safe_name}",
-                            "objects": new_objs,
-                            "compared_to_image_id": nearest_id,
-                            "compared_to_camera_id": nearest_camera_id,
-                            "distance_m": nearest_dist,
-                        },
-                    )
-
-            except Exception as e:
-                # Don't fail request after DB insert; just record the error
-                log.exception("Ditto update failed")
+            if mode == "new_thing":
+                # Rule #3: no existing image within radius → insert NEW row + NEW thing.
+                changed_flag = 0
+                reason_db = ""
                 cur.execute(
-                    "UPDATE images SET reason=? WHERE id=?",
-                    (f"ditto update error: {e}", image_id),
+                    "INSERT INTO images(camera_id,path,lat,lon,captured_at,processed,changed,reason,caption,detections_json) "
+                    "VALUES (?,?,?,?,?,1,?,?,?,?)",
+                    (
+                        camera_id,
+                        str(save_path),
+                        float(lat),
+                        float(lon),
+                        captured_at,
+                        changed_flag,
+                        reason_db,
+                        caption,
+                        json.dumps({"objects": new_objs}),
+                    ),
                 )
-                conn.commit()
+                image_id = cur.lastrowid
+                baseline_camera_id = camera_id
+                nearest_id = None
+                nearest_dist = None
+            else:
+                # Rule #1 or #2: reuse an existing DB row as baseline and UPDATE it
+                assert baseline_row is not None
+                image_id = int(baseline_row["id"])
+                baseline_camera_id = str(baseline_row["camera_id"])
 
+                nearest_id = image_id
+                nearest_dist = baseline_dist
+
+                changed_flag = 1 if mode == "baseline_major" else 0
+                reason_db = change_reason if mode == "baseline_major" else ""
+
+                # Update the baseline row to point to the NEW image & metadata
+                cur.execute(
+                    "UPDATE images SET camera_id=?, path=?, lat=?, lon=?, captured_at=?, "
+                    "processed=1, changed=?, reason=?, caption=?, detections_json=? "
+                    "WHERE id=?",
+                    (
+                        camera_id,
+                        str(save_path),
+                        float(lat),
+                        float(lon),
+                        captured_at,
+                        changed_flag,
+                        reason_db,
+                        caption,
+                        json.dumps({"objects": new_objs}),
+                        image_id,
+                    ),
+                )
+
+            conn.commit()
             conn.close()
 
-            print(f"compared_to_id: {nearest_id}, distance_m: {nearest_dist}")
+            # ---- Ditto updates (Thing per baseline row) ----
+
+            thing_id = _thing_id_for_image(baseline_camera_id, image_id)
+            ditto.ensure_thing(thing_id)
+
+            # lastCapture for Ditto
+            try:
+                img = Image.open(io.BytesIO(raw)).convert("RGB")
+                width, height = img.width, img.height
+            except Exception:
+                width = height = None
+
+            last_capture = {
+                "image_url": f"{STATIC_MOUNT}/{safe_name}",
+                "image_hash": f"sha256:{sha256_hex(raw)}",
+                "captured_at": captured_at,
+                "size_bytes": len(raw),
+                "lat": float(lat),
+                "lon": float(lon),
+            }
+            if width and height:
+                last_capture.update({"width": width, "height": height})
+            if CONFIG["EMBED_THUMBNAIL"] and width and height:
+                try:
+                    last_capture["thumbnail_b64"] = make_thumbnail_b64(
+                        Image.open(save_path), CONFIG["THUMBNAIL_MAX_SIZE"]
+                    )
+                except Exception:
+                    pass
+
+            # History append: always append, keep previous history
+            try:
+                existing_history = ditto.get_history(thing_id)
+            except Exception:
+                existing_history = []
+            if not isinstance(existing_history, list):
+                existing_history = []
+
+            history_entry = {
+                k: v for k, v in last_capture.items() if k != "thumbnail_b64"
+            }
+            full_history = existing_history + [history_entry]
+            max_len = CONFIG.get("DITTO_HISTORY_MAX", 20)
+            if len(full_history) > max_len:
+                full_history = full_history[-max_len:]
+
+            detections_payload = {
+                "objects": new_objs,
+                "caption": caption,
+                "changed_since_previous": bool(changed_flag),
+                "change_reason": reason_db or "",
+                "prev": {"objects": prev_objs_for_baseline},
+            }
+
+            ditto.patch_updates(
+                thing_id,
+                last_capture=last_capture,
+                history=full_history,
+                detections=detections_payload,
+                max_len=max_len,
+            )
+
+            # Alerts only for major change (rule #1)
+            if mode == "baseline_major" and CONFIG["SEND_ALERT_MESSAGE"]:
+                ditto.send_alert(
+                    thing_id,
+                    "alert",
+                    {
+                        "reason": reason_db or "major change detected",
+                        "thingId": thing_id,
+                        "image_url": f"{STATIC_MOUNT}/{safe_name}",
+                        "objects": new_objs,
+                        "compared_to_image_id": nearest_id,
+                        "compared_to_camera_id": baseline_camera_id,
+                        "distance_m": nearest_dist,
+                    },
+                )
 
             return jsonify(
                 {
                     "accepted": True,
                     "stored": True,
                     "id": image_id,
-                    "camera_id": camera_id,
+                    "camera_id": baseline_camera_id,
                     "thing_id": thing_id,
                     "url": f"{STATIC_MOUNT}/{safe_name}",
                     "lat": lat,
                     "lon": lon,
                     "captured_at": captured_at,
-                    "changed": bool(changed),
-                    "reason": reason or "",
+                    "changed": bool(changed_flag),
+                    "reason": reason_db or "",
                     "compared_to_id": nearest_id,
                     "distance_m": (
-                        None if nearest_id is None else float(nearest_dist)
+                        None if nearest_dist is None else float(nearest_dist)
                     ),
+                    "mode": mode,  # helpful for debugging: new_thing / baseline_minor / baseline_major
                 }
             )
         except Exception as e:
@@ -340,8 +457,7 @@ def create_app() -> Flask:
     @flask_app.route("/ditto/image/<camera_id>/<int:image_id>/captures", methods=["GET"])
     def get_captures_for_image(camera_id: str, image_id: int):
         """
-        For per-image Things, captures are trivial: history + lastCapture
-        from Ditto for that image Thing.
+        For per-image Things, captures are history + lastCapture from Ditto for that image Thing.
         """
         try:
             include_last = request.args.get("include_last", "1") not in (

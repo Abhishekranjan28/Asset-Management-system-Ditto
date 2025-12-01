@@ -24,9 +24,6 @@ class DittoClient:
         self.session.auth = (user or DITTO_USER, password or DITTO_PASS)
         self.session.headers.update({"Content-Type": "application/json"})
 
-    # ---------------------------------------------------------
-    # 🔥 UPDATED: Now logs Ditto 500 response fully
-    # ---------------------------------------------------------
     def ensure_thing(self, thing_id: str) -> None:
         url = f"{self.base}/api/2/things/{thing_id}"
 
@@ -51,7 +48,6 @@ class DittoClient:
 
         r2 = self.session.put(url, data=json.dumps(payload))
 
-        # 🔥 LOG FULL RESPONSE ON ERROR
         if r2.status_code >= 400:
             log.error(
                 "Ditto ensure_thing failed for %s → %s %s",
@@ -63,9 +59,6 @@ class DittoClient:
 
         r2.raise_for_status()
 
-    # ---------------------------------------------------------
-    # Remaining methods unchanged
-    # ---------------------------------------------------------
 
     def update_last_capture(self, thing_id: str, payload: Dict[str, Any]) -> None:
         url = f"{self.base}/api/2/things/{thing_id}/features/camera/properties/lastCapture"

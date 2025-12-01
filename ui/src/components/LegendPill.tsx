@@ -20,7 +20,7 @@ export const LegendPill: React.FC<{ color: 'alert' | 'normal'; label: string }> 
           color === 'alert' ? 'bg-red-500' : 'bg-emerald-500',
         ].join(' ')}
       />
-      <span>{label}</span>
+      <span className="tracking-wide">{label}</span>
     </span>
   )
 }

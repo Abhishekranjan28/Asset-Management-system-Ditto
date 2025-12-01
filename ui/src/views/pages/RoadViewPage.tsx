@@ -37,7 +37,7 @@ export const RoadViewPage: React.FC = () => {
             title: `${row.camera_id} • #${row.id}`,
             subtitle,
             time: row.captured_at,
-            iconText: isChanged ? '🚨' : '📷',
+            iconText: isChanged ? 'Δ' : '•',
             meta: { ...row, image_url: fullImageUrl },
           }
         })
@@ -62,9 +62,10 @@ export const RoadViewPage: React.FC = () => {
     return copy
   }, [points])
 
+  // Road width extends with number of points
   const roadWidth = useMemo(() => {
     const n = sorted.length || 1
-    return Math.max(n * 220, 1100)
+    return Math.max(n * 220, 1200)
   }, [sorted.length])
 
   return (
@@ -74,20 +75,29 @@ export const RoadViewPage: React.FC = () => {
         <div className="relative flex-1 overflow-x-auto bg-slate-100/80">
           <div className="inline-block px-6 py-8">
             <div className="relative mx-auto">
-              <div className="relative h-56" style={{ width: roadWidth }}>
-                {/* Road */}
-                <div className="absolute inset-y-4 left-0 right-0 rounded-[999px] bg-slate-900 shadow-[0_18px_40px_rgba(15,23,42,0.65)]">
+              <div className="relative h-60" style={{ width: roadWidth }}>
+                {/* Road surface */}
+                <div
+                  className="
+                    absolute inset-y-6 left-0 right-0
+                    rounded-[999px]
+                    bg-[radial-gradient(circle_at_10%_0%,#4b5563_0,#111827_55%,#020617_100%)]
+                    shadow-[0_20px_50px_rgba(15,23,42,0.7)]
+                  "
+                >
                   {/* Edge lines */}
-                  <div className="pointer-events-none absolute inset-y-4 left-4 right-4 rounded-[999px] border border-slate-700/80" />
-                  {/* Center dashed line */}
-                  <div className="pointer-events-none absolute inset-x-16 top-1/2 -translate-y-1/2">
-                    <div className="h-[3px] rounded-full bg-slate-700">
-                      <div className="h-[3px] rounded-full bg-[repeating-linear-gradient(to_right,transparent,transparent_14px,#e5e7eb_14px,#e5e7eb_26px)]" />
+                  <div className="pointer-events-none absolute inset-y-5 left-5 right-5 rounded-[999px] border border-slate-500/70" />
+                  <div className="pointer-events-none absolute inset-y-8 left-10 right-10 rounded-[999px] border border-slate-600/70" />
+
+                  {/* Center dashed line (muted yellow) */}
+                  <div className="pointer-events-none absolute inset-x-24 top-1/2 -translate-y-1/2">
+                    <div className="h-[3px] rounded-full bg-slate-800">
+                      <div className="h-[3px] rounded-full bg-[repeating-linear-gradient(to_right,transparent,transparent_16px,#eab308_16px,#eab308_30px)] opacity-85" />
                     </div>
                   </div>
 
                   {/* Vehicles / captures */}
-                  <div className="relative flex h-full items-center gap-10 px-16">
+                  <div className="relative flex h-full items-center gap-10 px-20">
                     {loading && (
                       <div className="text-xs text-slate-200">
                         Loading captures…
@@ -97,7 +107,9 @@ export const RoadViewPage: React.FC = () => {
                       <div className="text-xs text-red-200">{error}</div>
                     )}
                     {!loading && !error && sorted.length === 0 && (
-                      <div className="text-xs text-slate-200">No captures yet.</div>
+                      <div className="text-xs text-slate-200">
+                        No captures yet.
+                      </div>
                     )}
 
                     {!loading &&
@@ -115,12 +127,12 @@ export const RoadViewPage: React.FC = () => {
                             onClick={() => setSelected(p)}
                             className="group relative flex flex-col items-center gap-2 focus:outline-none"
                           >
-                            {/* vehicle body + shadow */}
+                            {/* Vehicle + shadow */}
                             <div className="flex flex-col items-center gap-1">
-                              <div className="h-1.5 w-12 rounded-full bg-black/40 blur-sm" />
+                              <div className="h-1.5 w-12 rounded-full bg-black/45 blur-sm" />
                               <div
                                 className={[
-                                  'relative flex h-14 w-14 items-center justify-center overflow-hidden rounded-md bg-slate-50 shadow-[0_10px_20px_rgba(0,0,0,0.55)]',
+                                  'relative flex h-16 w-16 items-center justify-center overflow-hidden rounded-md bg-slate-50 shadow-[0_14px_24px_rgba(0,0,0,0.55)]',
                                   isSelected
                                     ? 'ring-2 ring-sky-400'
                                     : changed
@@ -135,10 +147,11 @@ export const RoadViewPage: React.FC = () => {
                                     className="h-full w-full object-cover"
                                   />
                                 ) : (
-                                  <span className="text-lg text-slate-800">
+                                  <span className="text-sm font-semibold text-slate-800">
                                     {p.iconText}
                                   </span>
                                 )}
+                                {/* Status indicator */}
                                 <span
                                   className={[
                                     'absolute -top-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-semibold shadow-md',
@@ -152,17 +165,17 @@ export const RoadViewPage: React.FC = () => {
                               </div>
                             </div>
 
-                            {/* label under road */}
+                            {/* Label below road */}
                             <div className="pointer-events-none mt-2 flex max-w-[140px] flex-col items-center">
                               <span className="truncate text-[10px] font-medium text-slate-50 drop-shadow">
                                 {p.meta?.camera_id ?? p.title ?? p.id}
                               </span>
                               <span className="truncate text-[10px] text-slate-200 drop-shadow">
-                                #{idx + 1} • {p.time?.slice(0, 10) ?? ''}
+                                #{idx + 1} · {p.time?.slice(0, 10) ?? ''}
                               </span>
                             </div>
 
-                            {/* tooltip */}
+                            {/* Tooltip */}
                             <div className="pointer-events-none absolute -top-32 z-10 hidden min-w-[220px] max-w-xs rounded-lg bg-white p-2 text-left text-[11px] shadow-xl ring-1 ring-slate-200 group-hover:block">
                               <div className="font-semibold text-slate-900">
                                 {p.title ?? p.id}
@@ -183,7 +196,7 @@ export const RoadViewPage: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Legend floating above */}
+                {/* Legend floating above road */}
                 <div className="pointer-events-none absolute left-6 top-0 flex gap-2">
                   <LegendPill color="alert" label="Change detected" />
                   <LegendPill color="normal" label="Baseline capture" />

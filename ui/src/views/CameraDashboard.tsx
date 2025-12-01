@@ -23,11 +23,11 @@ const CameraDashboard: React.FC = () => {
     page === 'upload'
       ? 'Upload new camera captures and trigger analysis.'
       : page === 'road'
-      ? 'Visualize captures along the route and inspect change events.'
+      ? 'Visualise captures along the route and inspect change events.'
       : 'Inspect live device state and historical revisions from Ditto.'
 
   return (
-    <div className="flex h-screen w-screen bg-slate-50 text-slate-900">
+    <div className="flex h-screen w-screen bg-slate-50 text-slate-900 font-sans">
       {/* Sidebar */}
       <div
         className={`relative flex flex-col border-r border-slate-200 bg-white/95 backdrop-blur-sm transition-all duration-300 ${
@@ -38,12 +38,12 @@ const CameraDashboard: React.FC = () => {
         <div className="flex items-center justify-between border-b border-slate-200 px-3 py-3">
           {sidebarOpen ? (
             <div className="flex items-center gap-2">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-900 text-xs font-bold text-white">
+              <div className="flex h-8 w-8 items-center justify-center rounded-md bg-slate-900 text-xs font-semibold tracking-wide text-white">
                 NN
               </div>
               <div>
-                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                  NaturNest
+                <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                  NATURENEST
                 </div>
                 <div className="text-[11px] font-medium text-slate-900">
                   Camera Analytics
@@ -51,7 +51,7 @@ const CameraDashboard: React.FC = () => {
               </div>
             </div>
           ) : (
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-900 text-xs font-bold text-white">
+            <div className="flex h-8 w-8 items-center justify-center rounded-md bg-slate-900 text-xs font-semibold tracking-wide text-white">
               NN
             </div>
           )}
@@ -65,32 +65,29 @@ const CameraDashboard: React.FC = () => {
           </button>
         </div>
 
-        {/* Nav */}
-        <nav className="mt-3 flex-1 space-y-1 px-2">
+        {/* Navigation */}
+        <nav className="mt-4 flex-1 space-y-1 px-2">
           <SidebarItem
             active={page === 'upload'}
             label="Image Ingestion"
-            icon={<span>⬆️</span>}
             collapsed={!sidebarOpen}
             onClick={() => setPage('upload')}
           />
           <SidebarItem
             active={page === 'road'}
             label="Route Overview"
-            icon={<span>🛣️</span>}
             collapsed={!sidebarOpen}
             onClick={() => setPage('road')}
           />
           <SidebarItem
             active={page === 'ditto'}
             label="Ditto State"
-            icon={<span>🧩</span>}
             collapsed={!sidebarOpen}
             onClick={() => setPage('ditto')}
           />
         </nav>
 
-        {/* Footer */}
+        {/* Sidebar footer */}
         <div className="border-t border-slate-200 px-3 py-2 text-[10px] text-slate-500">
           {sidebarOpen && (
             <>
@@ -114,7 +111,7 @@ const CameraDashboard: React.FC = () => {
         <div className="flex items-center justify-between border-b border-slate-200 bg-white/90 px-6 py-3 backdrop-blur-sm">
           <div>
             <div className="flex items-center gap-2 text-[11px] text-slate-500">
-              <span className="uppercase tracking-wide">Operations</span>
+              <span className="uppercase tracking-[0.18em]">Operations</span>
               <span className="text-slate-300">/</span>
               <span className="font-medium text-slate-700">{pageTitle}</span>
             </div>
@@ -126,12 +123,13 @@ const CameraDashboard: React.FC = () => {
 
           <div className="flex items-center gap-3">
             <span className="rounded-full bg-slate-100 px-3 py-1 text-[10px] font-medium text-slate-700">
-              Status: <span className="text-emerald-600">Connected</span>
+              Status:{' '}
+              <span className="font-semibold text-emerald-600">Connected</span>
             </span>
           </div>
         </div>
 
-        {/* Page body */}
+        {/* Page content */}
         <div className="flex-1 overflow-hidden">
           {page === 'upload' && <UploadPage />}
           {page === 'road' && <RoadViewPage />}

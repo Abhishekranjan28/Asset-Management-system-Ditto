@@ -37,8 +37,8 @@ http://localhost:8080
 You should see a JSON response.
 
 Default login:
-Username	Password
-ditto	ditto
-devops	foobar
+Username:	ditto
+Password:ditto
+devops:	foobar
 
 
