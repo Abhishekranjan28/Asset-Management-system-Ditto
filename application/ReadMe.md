@@ -19,6 +19,14 @@ Or download a release:
 1.3 Navigate to Docker folder
 cd ditto/deploy/docker
 
+Default login:
+Username:	ditto
+Password:ditto
+devops:	foobar
+
+#In ditto deployment/docker/docker-compose.yml-gateway
+      replace commented code DEVOPS-PASSWORD=foobar to DEVOPS-PASSWORD=ditto
+
 1.4 Start Ditto
 docker-compose up -d
 
@@ -35,14 +43,6 @@ http://localhost:8080
 
 
 You should see a JSON response.
-
-Default login:
-Username:	ditto
-Password:ditto
-devops:	foobar
-
-#In ditto deployment/docker/docker-compose.yml-gateway
-      replace commented code DEVOPS-PASSWORD=foobar to DEVOPS-PASSWORD=ditto
 
 
 ✅ 1. Create the Policy File (policy.json)
