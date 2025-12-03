@@ -3,12 +3,26 @@
 # Camera → VLM (Gemini) → Ditto pipeline (Flask)
 
 ## What this does
-- Upload an image via API
-- Extract `lat/lon/captured_at` from the image using Gemini (OCR-style)
-- Always insert a row in SQLite
-- Find nearest prior image for the same camera (≤ 10 m). If different bytes, let Gemini decide if a major change happened (damaged/missing/changed)
-- Update Ditto (lastCapture + history + detections) and optionally emit an alert
+ Upload one image and apply the three rules:
 
+          1. If there IS at least one existing image within PROXIMITY_METERS (<=10 m)
+             AND a MAJOR change is detected against ANY of them:
+               - Reuse the corresponding DB row and Ditto thing for that baseline.
+               - Overwrite that row with the *new* image metadata.
+               - Append Ditto history, keep previous captures.
+
+          2. If there IS at least one existing image within PROXIMITY_METERS (<=10 m)
+             AND NO major change is detected against any of them:
+               - Reuse the NEAREST DB row + Ditto thing.
+               - Overwrite that row with the new image metadata
+                 (caption, objects, etc.).
+               - Append Ditto history and lastCapture (changed_since_previous=False).
+
+          3. If there is NO existing image within PROXIMITY_METERS:
+               - Insert a NEW DB row.
+               - Create a NEW Ditto thing for this row.
+               - Start history for this thing.
+               
 ## Install
 ```bash
 pip install -r camera_vlm_ditto/requirements.txt

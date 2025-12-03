@@ -41,4 +41,56 @@ Username:	ditto
 Password:ditto
 devops:	foobar
 
+#In ditto deployment/docker/docker-compose.yml-gateway
+      replace commented code DEVOPS-PASSWORD=foobar to DEVOPS-PASSWORD=ditto
 
+
+✅ 1. Create the Policy File (policy.json)
+
+Run:
+
+nano policy.json
+
+
+Paste this:
+
+{
+  "policyId": "default-camera-policy",
+  "entries": {
+    "camera-service": {
+      "subjects": {
+        "nginx:ditto": { "type": "user" }
+      },
+      "resources": {
+        "things:/": {
+          "grant": ["READ", "WRITE", "MODIFY"],
+          "revoke": []
+        },
+        "features:/": {
+          "grant": ["READ", "WRITE", "MODIFY"],
+          "revoke": []
+        },
+        "messages:/": {
+          "grant": ["READ", "WRITE"],
+          "revoke": []
+        }
+      }
+    }
+  }
+}
+
+
+✔ This gives the user ditto/ditto full permissions needed by your Python code.
+
+✅ 2. Upload the Policy to Ditto (Linux curl)
+
+Run this:
+
+curl -X PUT \
+  -u ditto:ditto \
+  -H "Content-Type: application/json" \
+  --data @policy.json \
+  http://localhost:8080/api/2/policies/default-camera-policy
+
+
+Expected: 200 OK
